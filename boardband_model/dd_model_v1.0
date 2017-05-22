@@ -1,0 +1,101 @@
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.types.{DoubleType, StringType, StructField, StructType};
+import org.apache.spark.{SparkConf, SparkContext, SparkException};
+import org.apache.spark.sql.hive.HiveContext;
+import org.apache.spark.mllib.regression.LinearRegressionWithSGD;
+import org.apache.spark.mllib.classification.LogisticRegressionWithSGD;
+import org.apache.spark.mllib.classification.LogisticRegressionWithLBFGS;
+import org.apache.spark.mllib.tree.DecisionTree;
+import org.apache.spark.mllib.tree.model.DecisionTreeModel;
+
+import org.apache.spark.mllib.regression.LabeledPoint;
+import org.apache.spark.mllib.linalg.Vectors;
+import org.apache.spark.mllib.evaluation.BinaryClassificationMetrics;
+import org.apache.spark.mllib.util.MLUtils;
+
+val conf = new SparkConf();
+
+@transient val hiveCtx = new HiveContext(sc);
+
+hiveCtx.sql(s"use jhzx_hive_db");
+
+
+val pre_Data=hiveCtx.sql("select user_id,gprs_fee,KD_RATE,AGE_RATE,CMCC_KD_CNT,HOME_DEPEND,SEARCH_BJ_FLAG,SEARCH_ZJ_FLAG,AGE_FLAG1,AGE_FLAG2,age_flag3,age_flag4,upay_flag,cluster2,cluster3,ARPU,ownserv_flag,otherserv_flag,night_gprs_rate,new_user_flag,LABEL from hdx_dataset ");
+//去掉搜索，
+val pre_Data=hiveCtx.sql("select user_id,gprs_fee,KD_RATE,AGE_RATE,CMCC_KD_CNT,HOME_DEPEND,SEARCH_BJ_FLAG,SEARCH_ZJ_FLAG,AGE_FLAG1,AGE_FLAG2,age_flag3,age_flag4,upay_flag,cluster2,cluster3,if(ARPU<50,1,0) low_arpu,if(ARPU>=50 and ARPU<150,1,0) mid_arpu,if(ARPU>=150,1,0) high_arpu,if(use_num<500,1,0) low_gprs,if(use_num>=500 and use_num<2000,1,0) mid_gprs,if(use_num>=2000,1,0) high_gprs,ownserv_flag,otherserv_flag,night_gprs_rate,new_user_flag,LABEL from hdx_dataset ");
+
+//arpu和use_num 归一化
+
+val pre_Data=hiveCtx.sql("select user_id,KD_RATE,AGE_RATE,CMCC_KD_CNT,HOME_DEPEND,SEARCH_BJ_FLAG,SEARCH_ZJ_FLAG,AGE_FLAG1,AGE_FLAG2,age_flag3,age_flag4,cluster2,cluster3,if(ARPU<50,1,0) low_arpu,if(ARPU>=50 and ARPU<150,1,0) mid_arpu,if(ARPU>=150,1,0) high_arpu,if(use_num<500,1,0) low_gprs,if(use_num>=500 and use_num<2000,1,0) mid_gprs,if(use_num>=2000,1,0) high_gprs,LABEL from jcc_jh_dataset_15 ");
+
+val pre_Data=hiveCtx.sql("select user_id,KD_RATE,AGE_RATE,CMCC_KD_CNT,HOME_DEPEND,SEARCH_BJ_FLAG,SEARCH_ZJ_FLAG,AGE_FLAG1,AGE_FLAG2,age_flag3,age_flag4,upay_flag,cluster2,cluster3,if(ARPU<50,1,0) low_arpu,if(ARPU>=50 and ARPU<150,1,0) mid_arpu,if(ARPU>=150,1,0) high_arpu,if(use_num<500,1,0) low_gprs,if(use_num>=500 and use_num<2000,1,0) mid_gprs,if(use_num>=2000,1,0) high_gprs,ownserv_flag,otherserv_flag,night_gprs_rate,new_user_flag,LABEL from jcc_jh_dataset_15 ");
+
+
+
+//val data1=pre_Data.rdd.map(x =>(x(0).toString, x(1),x(2),x(3),x(4).toString.toDouble,x(5).toDouble,x(6).toDouble,x(7).toString.toDouble,x(8).toString.toDouble,x(9).toString.toDouble,x(10).toString.toDouble,x(11).toString.toDouble,x(12).toString.toDouble,x(13).toString.toDouble,x(14).toString.toDouble,x(15).toString.toDouble,x(16).toString.toDouble,x(17).toString.toDouble,x(18).toString.toDouble));
+
+val data1=pre_Data.rdd.map(x =>(x(0).toString.toDouble, x(1).toString.toDouble,x(2).toString.toDouble,x(3).toString.toDouble,x(4).toString.toDouble, x(5).toString.toDouble,x(6).toString.toDouble,x(7).toString.toDouble,x(8).toString.toDouble,x(9).toString.toDouble,x(10).toString.toDouble,x(11).toString.toDouble,x(12).toString.toDouble,x(13).toString.toDouble,x(14).toString.toDouble,x(15).toString.toDouble,x(16).toString.toDouble,x(17).toString.toDouble,x(18).toString.toDouble));
+
+//val data1=pre_Data.rdd.map(x =>(x(0).toString, x(1).toString.toDouble,x(13).toString.toDouble,x(14).toString.toDouble,x(15).toString.toDouble,x(16).toString.toDouble,x(17).toString.toDouble,x(18).toString.toDouble,x(19).toString.toDouble,x(20).toString.toDouble,x(21).toString.toDouble,x(22).toString.toDouble));
+
+
+val data2=data1.map(x=>(x._1,LabeledPoint(x._19,Vectors.dense(x._2,x._3,x._4,x._5,x._6,x._7,x._8,x._9,x._10,x._11,x._12,x._13,x._14,x._15,x._16,x._17,x._18))));
+
+val splits = data2.randomSplit(Array(0.7, 0.3), seed = 11L);
+
+val (trainingData, testData) = (splits(0).cache(), splits(1).cache());
+
+val numIterations = 90;
+ 
+val model_log = LogisticRegressionWithSGD.train(trainingData.values, numIterations);
+
+println("weight:%s, intercept:%s ".format(model_log.weights,model_log.intercept));
+
+val Preds = testData.map { x =>
+  val pred = model_log.predict(x._2.features)
+  (x._1, pred,x._2.label)
+};
+
+val log_Preds = Preds.map { x=> (x._2,x._3) };
+
+val accuracy_log = 1.0 * log_Preds.filter(x => x._1 == x._2).count() / testData.count() //0.88
+
+val log_p = 1.0 * log_Preds.filter(x => (x._1 == 1.0) && (x._2 == x._1) ).count() / log_Preds.filter(x => x._1 == 1.0 ).count()
+val log_r = 1.0 * log_Preds.filter(x => (x._1 == 1.0) && (x._2 == x._1) ).count() / log_Preds.filter(x => x._2 == 1.0 ).count()
+
+
+
+val metrics_log = new BinaryClassificationMetrics(log_Preds)
+val auROC_log = metrics_log.areaUnderROC()
+
+
+//DT
+
+val numClasses = 2
+val categoricalFeaturesInfo = Map[Int, Int]()
+val impurity = "gini"
+val maxDepth = 7
+val maxBins = 128
+val modelDT = DecisionTree.trainClassifier(trainingData.values, numClasses, categoricalFeaturesInfo,
+  impurity, maxDepth, maxBins)
+
+val Preds = testData.map { x =>
+  val pred = model_log.predict(x._2.features)
+  (x._1, pred,x._2.label)
+};
+
+
+
+
+
+
+
+val log_Preds1=log_Preds.map(x=>Row(x._1,x._2,x._3));
+
+val schema = StructType(Seq(StructField("USER_ID", StringType, true),StructField("SCORE", DoubleType, true),StructField("SCORE1", DoubleType, true)));
+
+val result_df= hiveCtx.createDataFrame(log_Preds1,schema);
+
+result_df.registerTempTable("test11");
+
+hiveCtx.sql("insert into pred_label select * from test11")
